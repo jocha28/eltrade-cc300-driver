@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/geeckmc/eltrade-cc300-driver/cmd"
-	"github.com/imdario/mergo"
+	"dario.cat/mergo"
 	"github.com/xeipuuv/gojsonschema"
 	"io/ioutil"
 	"net/http"
