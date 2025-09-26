@@ -41,7 +41,7 @@ func GetDeviceState(dev *eltrade.Device) (DeviceInfo, error) {
 		return deviceInfo, err
 	}
 	dataSlice := strings.Split(data, string(eltrade.RESPONSE_DELIMITER))
-	eltrade.Logger.Debugf("fn:DeviceState -- command response ", dataSlice)
+	eltrade.Logger.Debugf("fn:DeviceState -- command response %v", dataSlice)
 	if len(dataSlice) < 10 {
 		return deviceInfo, fmt.Errorf("invalid device state response: too few fields")
 	}
@@ -56,7 +56,6 @@ func GetDeviceState(dev *eltrade.Device) (DeviceInfo, error) {
 	deviceInfo.TaxB = dataSlice[7]
 	deviceInfo.TaxC = dataSlice[8]
 	deviceInfo.TaxD = dataSlice[9]
-
 	return deviceInfo, nil
 }
 
@@ -68,7 +67,7 @@ func GetTaxServerState(dev *eltrade.Device) (DeviceInfo, error) {
 		return deviceInfo, err
 	}
 	dataSlice := strings.Split(data, string(eltrade.RESPONSE_DELIMITER))
-	eltrade.Logger.Debugf("fn:TaxServerState -- command response ", dataSlice)
+	eltrade.Logger.Debugf("fn:TaxServerState -- command response %v", dataSlice)
 	if len(dataSlice) >= 3 {
 		deviceInfo.UploadedDocumentCount = dataSlice[0]
 		deviceInfo.DocumentOnDeviceCount = dataSlice[1]
@@ -85,7 +84,7 @@ func GetTaxPayerInfo(dev *eltrade.Device) (DeviceInfo, error) {
 		req.Body(fmt.Sprintf("I%d", i))
 		r := dev.Send(req)
 		data, err := r.GetData()
-		eltrade.Logger.Debugf("fn:TaxPayerInfo -- command response ", string(req.Data), data)
+		eltrade.Logger.Debugf("fn:TaxPayerInfo -- command response I%d: %s", i, data)
 		if err != nil {
 			return deviceInfo, err
 		}
@@ -102,7 +101,6 @@ func GetTaxPayerInfo(dev *eltrade.Device) (DeviceInfo, error) {
 			deviceInfo.CompanyContactPhone = data
 		case 5:
 			deviceInfo.CompanyContactEmail = data
-
 		}
 	}
 	return deviceInfo, nil
@@ -120,6 +118,8 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- %v", err)
 		return "", err
 	}
+
+	// Ouvrir la facture
 	req := eltrade.NewRequest(eltrade.START_BILL)
 	eltradeString := eltrade.EltradeString{}
 	eltradeString.Append(bill.SellerId)
@@ -141,18 +141,21 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 	r := dev.Send(req)
 	res, err := r.GetData()
 	if err != nil {
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- START_BILL failed: %v", err)
 		return "", err
 	}
 	if strings.Contains(res, "E:") {
-		return "", fmt.Errorf("device initialization failed:  %s", res)
+		return "", fmt.Errorf("device initialization failed: %s", res)
 	}
 
 	// Ajout des articles
-	req = eltrade.NewRequest(eltrade.ADD_BILL_ITEM)
 	for _, product := range bill.Products {
+		req = eltrade.NewRequest(eltrade.ADD_BILL_ITEM)
 		eltradeString = eltrade.EltradeString{}
 		eltradeString.Val = clear(product.Label)
-		eltradeString.Val += "\n" + clear(strings.TrimSpace(product.BarCode))
+		if strings.TrimSpace(product.BarCode) != "" {
+			eltradeString.Val += "\n" + clear(strings.TrimSpace(product.BarCode))
+		}
 		eltradeString.Val += "\t" + product.Tax
 		eltradeString.Val += fmt.Sprintf("%f", product.Price)
 		eltradeString.Val += fmt.Sprintf("*%f", product.Items)
@@ -166,6 +169,7 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		r = dev.Send(req)
 		res, err = r.GetData()
 		if err != nil {
+			eltrade.Logger.Errorf("fn:Cmd:CreateBill -- ADD_BILL_ITEM failed: %v", err)
 			return "", err
 		}
 	}
@@ -175,6 +179,7 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 	r = dev.Send(req)
 	res, err = r.GetData()
 	if err != nil {
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- GET_BILL_SUB_TOTAL failed: %v", err)
 		return "", err
 	}
 	subTotalParts := strings.Split(res, ",")
@@ -187,11 +192,13 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 	req = eltrade.NewRequest(eltrade.GET_BILL_TOTAL)
 	var remaining float64
 	for _, payment := range bill.Payments {
+		eltradeString = eltrade.EltradeString{}
 		eltradeString.Val = fmt.Sprintf("%s%f", payment.Mode, payment.Amount)
 		req.Body(eltradeString.Val)
 		r = dev.Send(req)
 		res, err = r.GetData()
 		if err != nil {
+			eltrade.Logger.Errorf("fn:Cmd:CreateBill -- GET_BILL_TOTAL failed: %v", err)
 			return "", err
 		}
 		parts := strings.Split(res, ",")
@@ -200,6 +207,7 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		}
 		remaining, err = strconv.ParseFloat(parts[4], 64)
 		if err != nil {
+			eltrade.Logger.Errorf("fn:Cmd:CreateBill -- Parse remaining failed: %v", err)
 			return "", err
 		}
 	}
@@ -207,18 +215,35 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		return "", fmt.Errorf("paiements insuffisants: restant %f", remaining)
 	}
 
-	// Fin de facture (38h)
-	req = eltrade.NewRequest(eltrade.END_BILL)
-	req.Body("") // Vide explicitement
+	// Finaliser avec la commande 38h
+	req = eltrade.NewRequest(0x38) // Commande 38h
+	req.Body("")
 	r = dev.Send(req)
 	res, err = r.GetData()
 	if err != nil {
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- Command 38h failed: %v", err)
 		return "", err
 	}
-	splitedRes := strings.Split(res, ",")
-	if len(splitedRes) < 7 || splitedRes[0] != "F" {
-		return "", fmt.Errorf("fin de facture échouée: %s", res)
+	splitedRes := strings.Split(res, ";")
+	if len(splitedRes) < 5 || splitedRes[0] != "F" {
+		return "", fmt.Errorf("fin de facture échouée, réponse invalide: %s", res)
 	}
-	// QR format: F;NIM;SIG;IFU;DT
-	return fmt.Sprintf("F;%s;%s;%s;%s", splitedRes[1], splitedRes[6], splitedRes[3], splitedRes[5]), nil
+	// Format: F;<NIM>;<SIG>;<IFU>;<DT>
+	fiscal_response := fmt.Sprintf("F;%s;%s;%s;%s", splitedRes[1], splitedRes[2], splitedRes[3], splitedRes[4])
+
+	// Exécuter END_BILL pour fermer la session
+	req = eltrade.NewRequest(eltrade.END_BILL)
+	req.Body("")
+	r = dev.Send(req)
+	res, err = r.GetData()
+	if err != nil {
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- END_BILL failed: %v", err)
+		return "", err
+	}
+
+	return fiscal_response, nil
+}
+
+func clear(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\n", ""), "\t", "")
 }
