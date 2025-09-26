@@ -8,9 +8,9 @@ type Product struct {
 	Tax                    string  `json:"tax"`
 	Price                  float32 `json:"price"`
 	Items                  float32 `json:"items"`
-	SpecificTax            string  `json:"specific_tax"`
+	SpecificTax            float32 `json:"specific_tax"`
 	SpecificTaxDesc        string  `json:"specific_tax_desc"`
-	OriginalPrice          string  `json:"original_price"`
+	OriginalPrice          float32 `json:"original_price"`
 	PriceChangeExplanation string  `json:"price_change_explanation"`
 }
 

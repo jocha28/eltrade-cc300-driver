@@ -17,7 +17,7 @@ var (
 	}
 	replacer = strings.NewReplacer("\r", "^xa;",
 		"\n", "^xd;",
-		//",", "^x2c;",
+		",", "^x2c;",  // Décommenté pour échapper ','
 		"<", "^lt;",
 		">", "^gt;",
 		"&", "^amp;")
@@ -80,12 +80,14 @@ type EltradeString struct {
 }
 
 func (e *EltradeString) Append(str string) *EltradeString {
+	str = clear(str)  // Appliquer échappement
 	if strings.TrimSpace(str) != "" {
 		e.AppendWD(str, ",")
 	}
 	return e
 }
 func (e *EltradeString) AppendWD(str string, delimiter string) *EltradeString {
+	str = clear(str)  // Appliquer échappement
 	e.Val += fmt.Sprintf("%s%s", delimiter, strings.TrimSpace(str))
 	return e
 }

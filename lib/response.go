@@ -94,7 +94,7 @@ func (r *Response) GetData() (string, error) {
 }
 
 func clean(rawBytes []byte) []byte {
-	for ok := false; ok; ok = len(rawBytes) > 1 && rawBytes[len(rawBytes)-1] != ETX {
+	for ok := true; ok; ok = len(rawBytes) > 1 && rawBytes[len(rawBytes)-1] != ETX {
 		rawBytes = rawBytes[:len(rawBytes)-1]
 	}
 	for ok := len(rawBytes) > 1 && rawBytes[0] != SOH; ok; ok = len(rawBytes) > 1 && rawBytes[0] != SOH {

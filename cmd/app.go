@@ -5,6 +5,7 @@ import (
 	"github.com/geeckmc/eltrade-cc300-driver/lib"
 	"strings"
 	"time"
+	"strconv"
 )
 
 type DeviceInfo struct {
@@ -41,19 +42,20 @@ func GetDeviceState(dev *eltrade.Device) (DeviceInfo, error) {
 	}
 	dataSlice := strings.Split(data, string(eltrade.RESPONSE_DELIMITER))
 	eltrade.Logger.Debugf("fn:DeviceState -- command response ", dataSlice)
-	if len(dataSlice) >= 10 {
-		deviceInfo.NIM = dataSlice[0]
-		deviceInfo.IFU = dataSlice[1]
-		formattedDate, _ := time.ParseInLocation("20060102150405", dataSlice[2], timeZone)
-		deviceInfo.TIME = formattedDate.String()
-		deviceInfo.COUNTER = dataSlice[3]
-		deviceInfo.SellBillCounter = dataSlice[4]
-		deviceInfo.SettlementBillCounter = dataSlice[5]
-		deviceInfo.TaxA = dataSlice[6]
-		deviceInfo.TaxB = dataSlice[7]
-		deviceInfo.TaxC = dataSlice[8]
-		deviceInfo.TaxD = dataSlice[9]
+	if len(dataSlice) < 10 {
+		return deviceInfo, fmt.Errorf("invalid device state response: too few fields")
 	}
+	deviceInfo.NIM = dataSlice[0]
+	deviceInfo.IFU = dataSlice[1]
+	formattedDate, _ := time.ParseInLocation("20060102150405", dataSlice[2], timeZone)
+	deviceInfo.TIME = formattedDate.String()
+	deviceInfo.COUNTER = dataSlice[3]
+	deviceInfo.SellBillCounter = dataSlice[4]
+	deviceInfo.SettlementBillCounter = dataSlice[5]
+	deviceInfo.TaxA = dataSlice[6]
+	deviceInfo.TaxB = dataSlice[7]
+	deviceInfo.TaxC = dataSlice[8]
+	deviceInfo.TaxD = dataSlice[9]
 
 	return deviceInfo, nil
 }
@@ -119,7 +121,8 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		return "", err
 	}
 	req := eltrade.NewRequest(eltrade.START_BILL)
-	eltradeString := eltrade.EltradeString{Val: bill.SellerId}
+	eltradeString := eltrade.EltradeString{}
+	eltradeString.Append(bill.SellerId)
 	eltradeString.Append(bill.SellerName)
 	eltradeString.Append(devInfo.IFU)
 	eltradeString.Append(devInfo.TaxA)
@@ -144,24 +147,20 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		return "", fmt.Errorf("device initialization failed:  %s", res)
 	}
 
+	// Ajout des articles
 	req = eltrade.NewRequest(eltrade.ADD_BILL_ITEM)
-	eltradeString = eltrade.EltradeString{}
 	for _, product := range bill.Products {
-		eltradeString.AppendWD(product.Label, "")
-		if strings.TrimSpace(product.BarCode) != "" {
-			eltradeString.Append(fmt.Sprintf("\n%s", product.BarCode))
+		eltradeString = eltrade.EltradeString{}
+		eltradeString.Val = clear(product.Label)
+		eltradeString.Val += "\n" + clear(strings.TrimSpace(product.BarCode))
+		eltradeString.Val += "\t" + product.Tax
+		eltradeString.Val += fmt.Sprintf("%f", product.Price)
+		eltradeString.Val += fmt.Sprintf("*%f", product.Items)
+		if product.SpecificTax > 0 {
+			eltradeString.Val += fmt.Sprintf(";%f,%s", product.SpecificTax, clear(product.SpecificTaxDesc))
 		}
-		eltradeString.AppendWD("", "\t")
-		eltradeString.AppendWD(product.Tax, "")
-		eltradeString.AppendWD(fmt.Sprintf("%f", product.Price), "")
-		eltradeString.AppendWD(fmt.Sprintf("%f", product.Items), "*")
-		if strings.TrimSpace(product.SpecificTax) != "" {
-			eltradeString.AppendWD(product.SpecificTax, ";")
-			eltradeString.Append(product.SpecificTaxDesc)
-		}
-		if strings.TrimSpace(product.OriginalPrice) != "" {
-			eltradeString.AppendWD(product.OriginalPrice, "\t")
-			eltradeString.AppendWD(product.PriceChangeExplanation, ",")
+		if product.OriginalPrice > 0 {
+			eltradeString.Val += fmt.Sprintf("\t%f,%s", product.OriginalPrice, clear(product.PriceChangeExplanation))
 		}
 		req.Body(eltradeString.Val)
 		r = dev.Send(req)
@@ -170,37 +169,56 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 			return "", err
 		}
 	}
-	//TODO: call 33h and stop process if saved amount is different from bill amount
+
+	// Vérification sous-total (33h)
+	req = eltrade.NewRequest(eltrade.GET_BILL_SUB_TOTAL)
+	r = dev.Send(req)
+	res, err = r.GetData()
+	if err != nil {
+		return "", err
+	}
+	subTotalParts := strings.Split(res, ",")
+	if subTotalParts[0] != "P" || len(subTotalParts) < 4 {
+		return "", fmt.Errorf("sous-total invalide: %s", res)
+	}
+	// TODO: Calculer total local et comparer avec subTotalParts[3] (TTC)
+
+	// Total et paiements (35h)
 	req = eltrade.NewRequest(eltrade.GET_BILL_TOTAL)
+	var remaining float64
 	for _, payment := range bill.Payments {
-		count := 1
-		for {
-			eltradeString = eltrade.EltradeString{Val: fmt.Sprintf("%s%f", payment.Mode, payment.Amount)}
-			count++
-			req.Body(eltradeString.Val)
-			r = dev.Send(req)
-			res, err = r.GetData()
-			if err != nil {
-				return "", err
-			}
-			if count == 3 || res[0] == 'R' {
-				break
-			}
+		eltradeString.Val = fmt.Sprintf("%s%f", payment.Mode, payment.Amount)
+		req.Body(eltradeString.Val)
+		r = dev.Send(req)
+		res, err = r.GetData()
+		if err != nil {
+			return "", err
+		}
+		parts := strings.Split(res, ",")
+		if parts[0] != "P" || len(parts) < 5 {
+			return "", fmt.Errorf("paiement échoué: %s", res)
+		}
+		remaining, err = strconv.ParseFloat(parts[4], 64)
+		if err != nil {
+			return "", err
 		}
 	}
-	//END BILL
+	if remaining > 0 {
+		return "", fmt.Errorf("paiements insuffisants: restant %f", remaining)
+	}
+
+	// Fin de facture (38h)
 	req = eltrade.NewRequest(eltrade.END_BILL)
-	req.Body(eltradeString.Val)
+	req.Body("") // Vide explicitement
 	r = dev.Send(req)
 	res, err = r.GetData()
 	if err != nil {
 		return "", err
 	}
 	splitedRes := strings.Split(res, ",")
-	//TODO : handle case Bill is not registered
-	if len(splitedRes) < 7 {
-		return res, fmt.Errorf("Invalid cmd response %s", res)
+	if len(splitedRes) < 7 || splitedRes[0] != "F" {
+		return "", fmt.Errorf("fin de facture échouée: %s", res)
 	}
-	println(splitedRes)
-	return fmt.Sprintf("F;%s;%s;%s;%s", splitedRes[4], splitedRes[6], splitedRes[5], splitedRes[3]), nil
+	// QR format: F;NIM;SIG;IFU;DT
+	return fmt.Sprintf("F;%s;%s;%s;%s", splitedRes[1], splitedRes[6], splitedRes[3], splitedRes[5]), nil
 }
