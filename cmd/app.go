@@ -54,7 +54,6 @@ func GetDeviceState(dev *eltrade.Device) (DeviceInfo, error) {
 		deviceInfo.TaxC = dataSlice[8]
 		deviceInfo.TaxD = dataSlice[9]
 	}
-
 	return deviceInfo, nil
 }
 
@@ -100,7 +99,6 @@ func GetTaxPayerInfo(dev *eltrade.Device) (DeviceInfo, error) {
 			deviceInfo.CompanyContactPhone = data
 		case 5:
 			deviceInfo.CompanyContactEmail = data
-
 		}
 	}
 	return deviceInfo, nil
@@ -118,35 +116,42 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- %v", err)
 		return "", err
 	}
+
 	req := eltrade.NewRequest(eltrade.START_BILL)
 	eltradeString := eltrade.EltradeString{Val: bill.SellerId}
 	eltradeString.Append(bill.SellerName)
-	eltradeString.Append(devInfo.IFU)
+	eltradeString.Append(bill.BuyerIFU) // Utiliser BuyerIFU au lieu de devInfo.IFU
 	eltradeString.Append(devInfo.TaxA)
 	eltradeString.Append(devInfo.TaxB)
 	eltradeString.Append(devInfo.TaxC)
 	eltradeString.Append(devInfo.TaxD)
 	eltradeString.Append(bill.VT)
-	eltradeString.Append(bill.RT)
-	eltradeString.Append(bill.RN)
-	eltradeString.Append(bill.BuyerIFU)
+	if bill.RT != "" {
+		eltradeString.Append(bill.RT)
+	}
+	if bill.RN != "" {
+		eltradeString.Append(bill.RN)
+	}
 	eltradeString.Append(bill.BuyerName)
 	if bill.AIB != "N/A" {
 		eltradeString.Append(bill.AIB)
 	}
 	req.Body(eltradeString.Val)
+	eltrade.Logger.Debugf("fn:Cmd:CreateBill -- C0h request: %s", eltradeString.Val)
 	r := dev.Send(req)
 	res, err := r.GetData()
 	if err != nil {
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- C0h error: %v", err)
 		return "", err
 	}
 	if strings.Contains(res, "E:") {
-		return "", fmt.Errorf("device initialization failed:  %s", res)
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- C0h failed: %s", res)
+		return "", fmt.Errorf("device initialization failed: %s", res)
 	}
 
 	req = eltrade.NewRequest(eltrade.ADD_BILL_ITEM)
-	eltradeString = eltrade.EltradeString{}
 	for _, product := range bill.Products {
+		eltradeString = eltrade.EltradeString{}
 		eltradeString.AppendWD(product.Label, "")
 		if strings.TrimSpace(product.BarCode) != "" {
 			eltradeString.Append(fmt.Sprintf("\n%s", product.BarCode))
@@ -164,43 +169,49 @@ func CreateBill(dev *eltrade.Device, json []byte) (string, error) {
 			eltradeString.AppendWD(product.PriceChangeExplanation, ",")
 		}
 		req.Body(eltradeString.Val)
+		eltrade.Logger.Debugf("fn:Cmd:CreateBill -- ADD_BILL_ITEM request: %s", eltradeString.Val)
 		r = dev.Send(req)
 		res, err = r.GetData()
 		if err != nil {
+			eltrade.Logger.Errorf("fn:Cmd:CreateBill -- ADD_BILL_ITEM error: %v", err)
 			return "", err
 		}
 	}
-	//TODO: call 33h and stop process if saved amount is different from bill amount
+
 	req = eltrade.NewRequest(eltrade.GET_BILL_TOTAL)
 	for _, payment := range bill.Payments {
 		count := 1
 		for {
 			eltradeString = eltrade.EltradeString{Val: fmt.Sprintf("%s%f", payment.Mode, payment.Amount)}
-			count++
 			req.Body(eltradeString.Val)
+			eltrade.Logger.Debugf("fn:Cmd:CreateBill -- GET_BILL_TOTAL request: %s", eltradeString.Val)
 			r = dev.Send(req)
 			res, err = r.GetData()
 			if err != nil {
+				eltrade.Logger.Errorf("fn:Cmd:CreateBill -- GET_BILL_TOTAL error: %v", err)
 				return "", err
 			}
 			if count == 3 || res[0] == 'R' {
 				break
 			}
+			count++
 		}
 	}
-	//END BILL
+
 	req = eltrade.NewRequest(eltrade.END_BILL)
 	req.Body(eltradeString.Val)
+	eltrade.Logger.Debugf("fn:Cmd:CreateBill -- END_BILL request: %s", eltradeString.Val)
 	r = dev.Send(req)
 	res, err = r.GetData()
 	if err != nil {
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- END_BILL error: %v", err)
 		return "", err
 	}
 	splitedRes := strings.Split(res, ",")
-	//TODO : handle case Bill is not registered
 	if len(splitedRes) < 7 {
-		return res, fmt.Errorf("Invalid cmd response %s", res)
+		eltrade.Logger.Errorf("fn:Cmd:CreateBill -- Invalid END_BILL response: %s", res)
+		return res, fmt.Errorf("invalid cmd response: %s", res)
 	}
-	println(splitedRes)
+	eltrade.Logger.Debugf("fn:Cmd:CreateBill -- END_BILL response: %v", splitedRes)
 	return fmt.Sprintf("F;%s;%s;%s;%s", splitedRes[4], splitedRes[6], splitedRes[5], splitedRes[3]), nil
 }
